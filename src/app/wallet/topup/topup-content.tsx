@@ -1,25 +1,44 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { MobileShell } from "@/components/layout/mobile-shell";
 import { Button } from "@/components/ui/button";
 
-const AMOUNTS = [5000, 10000, 20000]; // agorot
+const AMOUNTS = [5000, 10000, 20000, 50000]; // agorot
 
 export function TopupContent() {
   const router = useRouter();
-  const searchParams = useSearchParams();
-  const initialAmount = Number(searchParams.get("amount")) || 10000;
-  const [selectedAmount, setSelectedAmount] = useState(initialAmount);
+  const [selectedAmount, setSelectedAmount] = useState(10000);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const shekel = (a: number) => `${a / 100}`;
 
   async function handlePayment() {
     setLoading(true);
-    // TODO: Create Stripe checkout session via /api/stripe/checkout
-    setLoading(false);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/cardcom/create-page", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amountAgorot: selectedAmount }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok || !data.url) {
+        setError(data.error ?? "שגיאה ביצירת עמוד תשלום");
+        setLoading(false);
+        return;
+      }
+
+      window.location.href = data.url;
+    } catch {
+      setError("שגיאת רשת — נסה שנית");
+      setLoading(false);
+    }
   }
 
   return (
@@ -45,46 +64,42 @@ export function TopupContent() {
         </div>
 
         {/* Quick amounts */}
-        <div className="grid grid-cols-3 gap-2 mb-8">
+        <div className="grid grid-cols-4 gap-2 mb-8">
           {AMOUNTS.map((a) => (
             <button
               key={a}
               onClick={() => setSelectedAmount(a)}
-              className={`py-3 rounded-xl font-bold transition-all ${
+              className={`py-3 rounded-xl font-bold transition-all text-sm ${
                 selectedAmount === a
                   ? "bg-[var(--accent)] text-black"
-                  : "bg-[var(--surface)] border border-[var(--border)] text-[var(--text-primary)]"
+                  : "bg-[var(--bg-card)] border border-[var(--border)] text-[var(--text-primary)]"
               }`}
             >
-              {shekel(a)}
+              {shekel(a)} ₪
             </button>
           ))}
         </div>
 
-        {/* Payment method */}
-        <div className="text-[10px] text-[var(--text-tertiary)] font-bold uppercase tracking-widest mb-3">
-          אמצעי תשלום
-        </div>
-        <div className="bg-[var(--bg-card)] border border-[var(--accent)] rounded-2xl p-4 flex items-center gap-3 mb-2">
-          <span className="text-2xl">💳</span>
+        {/* Payment method info */}
+        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4 flex items-center gap-3 mb-8">
+          <span className="text-2xl">🔒</span>
           <div className="flex-1">
-            <div className="font-bold text-sm">Visa •••• 4242</div>
-            <div className="text-xs text-[var(--text-tertiary)]">בתוקף עד 09/27</div>
+            <div className="font-bold text-sm">תשלום מאובטח בכרטיס אשראי</div>
+            <div className="text-xs text-[var(--text-tertiary)]">מופעל על ידי Cardcom</div>
           </div>
-          <span className="text-[var(--accent)] font-bold">✓</span>
         </div>
-        <div className="bg-[var(--bg-card)] border border-[var(--border)] rounded-2xl p-4 flex items-center gap-3 mb-8 cursor-pointer">
-          <span className="text-2xl text-[var(--text-tertiary)]">+</span>
-          <span className="font-semibold text-[var(--text-secondary)] text-sm">
-            הוסף אמצעי תשלום
-          </span>
-        </div>
+
+        {error && (
+          <div className="bg-[rgba(255,68,102,0.1)] border border-[var(--danger)] rounded-xl p-3 text-center text-sm text-[var(--danger)] mb-4">
+            {error}
+          </div>
+        )}
 
         <Button size="lg" loading={loading} onClick={handlePayment}>
           שלם {shekel(selectedAmount)} ₪ 🔒
         </Button>
         <p className="text-center text-xs text-[var(--text-tertiary)] mt-3">
-          תשלום מאובטח דרך Stripe
+          מועבר לדף תשלום מאובטח של Cardcom
         </p>
       </div>
     </MobileShell>
