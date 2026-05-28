@@ -34,7 +34,7 @@
 | Font | Heebo (Google Fonts) — תמיכה מלאה בעברית |
 | Auth + DB + Realtime | Supabase |
 | Video/Audio | LiveKit (`@livekit/components-react`) |
-| Payments | Stripe |
+| Payments | Cardcom (ממשק JSON v11) |
 | Push Notifications | OneSignal (מתוכנן) |
 | Deployment | Render |
 | State | Zustand |
@@ -82,7 +82,14 @@ src/
 │   │   ├── page.tsx
 │   │   └── topup/
 │   │       ├── page.tsx            # Suspense wrapper
-│   │       └── topup-content.tsx   # useSearchParams client component
+│   │       ├── topup-content.tsx   # בוחר סכום → redirect ל-Cardcom
+│   │       ├── success/page.tsx    # חזרה מ-Cardcom — הצלחה
+│   │       └── failed/page.tsx     # חזרה מ-Cardcom — כישלון
+│   ├── api/
+│   │   ├── livekit/token/route.ts  # JWT generation (POST, auth required)
+│   │   └── cardcom/
+│   │       ├── create-page/route.ts # יצירת עמוד תשלום Cardcom
+│   │       └── webhook/route.ts     # קבלת אישור תשלום + credit_wallet
 │   ├── history/page.tsx
 │   └── profile/page.tsx
 ├── components/
@@ -95,9 +102,12 @@ src/
 │   ├── utils.ts                    # cn(), formatILS(), formatDuration()
 │   └── supabase/
 │       ├── client.ts               # Browser client
-│       └── server.ts               # Server client (async cookies)
+│       ├── server.ts               # Server client (async cookies)
+│       └── admin.ts                # Service-role client (webhook/server ops)
 └── types/index.ts                  # TypeScript types
-supabase/schema.sql                 # כל הסכמה + RLS + RPC
+supabase/
+├── schema.sql                      # כל הסכמה + RLS + RPC
+└── cardcom_additions.sql           # reference_id→text + credit_wallet RPC
 render.yaml                         # Render deployment config
 ```
 
@@ -150,6 +160,16 @@ render.yaml                         # Render deployment config
 -- בדיקת תמחור vs budget
 -- יצירת call + עדכון request status אטומי
 ```
+
+### RPC — `credit_wallet`
+נקרא מ-webhook של Cardcom (דרך service role):
+```sql
+-- update profiles set wallet_balance = wallet_balance + p_amount
+-- insert into wallet_transactions (topup)
+-- אטומי — שתי הפעולות ביחד
+```
+נמצא ב-`supabase/cardcom_additions.sql` (רץ אחרי schema.sql).  
+שינוי קריטי באותו קובץ: `reference_id` שונה מ-`uuid` ל-`text` (Cardcom שולח מספר עסקה, לא UUID).
 
 ### RLS
 - לקוח רואה רק את הבקשות שלו
@@ -231,38 +251,86 @@ redirect_allow_list:
 
 ---
 
-## env vars נדרשים
+## env vars — מצב נוכחי
 
 ```env
-# מוגדר
+# מוגדר (Render + .env.local)
 NEXT_PUBLIC_SUPABASE_URL=https://ojamdeadscwjvmqlukai.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_qAaMyshXz2YLJwh2XCkwFA_yfRj7SZ0
+SUPABASE_SERVICE_ROLE_KEY=<מוגדר — ב-.env.local ובRender>
 
-# להוסיף
-SUPABASE_SERVICE_ROLE_KEY=
-STRIPE_SECRET_KEY=
-STRIPE_PUBLISHABLE_KEY=
-STRIPE_WEBHOOK_SECRET=
-LIVEKIT_URL=
-LIVEKIT_API_KEY=
-LIVEKIT_API_SECRET=
+NEXT_PUBLIC_LIVEKIT_URL=wss://help-match-n94xxhku.livekit.cloud
+LIVEKIT_API_KEY=APIqLx6CksZcHbV
+LIVEKIT_API_SECRET=helpmatch-1czqvb
+
+NEXT_PUBLIC_BASE_URL=https://www.jaselp.com
+CARDCOM_TERMINAL=1000
+CARDCOM_API_NAME=CardTest1994          # Test — להחליף ב-Production
+CARDCOM_API_PASSWORD=Terminaltest2026  # Test — להחליף ב-Production
+
+# עדיין חסר
+# ONESIGNAL_APP_ID=
+# ONESIGNAL_API_KEY=
 ```
 
 ---
 
 ## מה עוד צריך לבנות (Post-MVP)
 
-- [ ] LiveKit — חיבור אמיתי (כרגע placeholder UI)
-- [ ] Stripe — `/api/stripe/checkout` route + webhook לעדכון ארנק
+- [x] LiveKit — token API + full in-call UI
+- [x] Cardcom — create-page + webhook + success/failed pages
+- [x] Billing engine — client-side timer + low-balance auto-end
 - [ ] OneSignal — Push notifications למומחה על בקשה חדשה
-- [ ] API route ל-LiveKit token generation
-- [ ] Billing engine — server-side חישוב עלות בזמן אמת
+- [ ] Cardcom Production — להחליף TerminalNumber, ApiName, ApiPassword לאחר אישור
 - [ ] KYC — upload אמיתי של מסמכים (Supabase Storage)
 - [ ] Expert public profile page
 - [ ] Dispute / Refund flow
 - [ ] Admin panel
 - [ ] Onboarding tutorial (3-4 שלבים)
 - [ ] Notification preferences
+
+---
+
+## LiveKit
+
+| פרט | ערך |
+|---|---|
+| Project | help-match |
+| URL | `wss://help-match-n94xxhku.livekit.cloud` |
+| API Key | `APIqLx6CksZcHbV` |
+
+- Token מיוצר server-side ב-`/api/livekit/token` (POST, auth required)
+- TTL: 4 שעות
+- Grants: `roomJoin`, `canPublish`, `canSubscribe`, `canPublishData`
+- Room name: `call-{callId}`
+- בדיקת הרשאה: ורות שהמשתמש הוא `client_id` או `expert_id` של השיחה
+
+---
+
+## Cardcom — ממשק תשלום
+
+**Terminal: 1000** | API: `https://secure.cardcom.solutions/api/v11/`
+
+### Flow
+```
+/wallet/topup → בחירת סכום
+  → POST /api/cardcom/create-page
+      body: { amountAgorot }
+      Cardcom body: { TerminalNumber, Amount (שקלים!), ReturnValue: userId, ... }
+  → redirect לעמוד Cardcom
+  → לאחר תשלום: Cardcom שולח POST ל /api/cardcom/webhook
+      webhook: { LowProfileId }
+      → GetLpResult לאימות
+      → credit_wallet RPC (atomic: update balance + insert transaction)
+  → Cardcom מפנה ל /wallet/topup/success או /wallet/topup/failed
+```
+
+### נקודות קריטיות
+- Cardcom מצפה לסכום ב-**שקלים** (לא אגורות) — `amountAgorot / 100`
+- `ReturnValue` = userId — מוחזר ב-GetLpResult לזיהוי המשתמש ב-webhook
+- `GetLpResult` דורש `ApiName` + `ApiPassword` (בלעדיהם — שגיאה "user blocked")
+- Idempotency: בדיקת `reference_id` לפני credit — מונע כפל זיכוי
+- Webhook רץ ללא cookies → חייב `createAdminClient()` (service role)
 
 ---
 
